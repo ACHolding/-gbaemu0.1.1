@@ -1,13 +1,7 @@
 """mewgba$ — single-file GBA emulator (files=off). Requires Python 3.14+.
 
-Next Level Moves (pick what you want):
-
-Performance — Make Cython do even more (especially PPU and CPU hot paths)
-Accuracy — Fix remaining CPU bugs so more test ROMs boot
-Debug Tools — Register viewer + memory viewer (connect it to your Hex Editor!)
-Save States — Super important for GBA
-Sound (later)
-UI Polish — FPS counter, speed control, recent files, etc.
+See MEWGBA_ROADMAP and MEWGBA_CYTHON_GUIDE in this file for feature + accel docs.
+AC Holdings 1999-2026 — maximum CatSDK vibes, zero external .pyx project files.
 """
 from __future__ import annotations
 
@@ -79,6 +73,94 @@ Save States — Super important for GBA
 Sound (later)
 UI Polish — FPS counter, speed control, recent files, etc."""
 
+MEWGBA_CYTHON_GUIDE = """# mewgba$ — Cython Acceleration Guide (files=off)
+
+**AC Holdings 1999-2026**
+*Single-file GBA emulator with maximum CatSDK vibes*
+
+## Philosophy
+
+We keep everything **self-contained** (files=off).
+No external `.pyx` files lying around — everything lives in one `.py` with smart temp caching.
+
+## Core Strategy
+
+1. Store Cython code as a big string (`_MEWGBA_PYX`)
+2. Hash it → only recompile when changed
+3. Use `pyximport` + temp cache folder (`MEWGBA_CACHE`)
+4. Fallback to pure Python automatically
+
+## How to Add More Cython Vibes
+
+### 1. New Hot Path Function
+
+Add to the `_MEWGBA_PYX` string:
+
+    def fast_new_function(...):
+        ...
+
+### 2. Call it from Python
+
+    if _ACCEL is not None:
+        _ACCEL.fast_new_function(...)
+    else:
+        self.slow_version(...)
+
+### 3. Recompile Trigger
+
+Just change the string → hash changes → auto recompiles on next run.
+
+## Current Accelerated Functions
+
+- fast_run_cycles
+- fast_run_scanline
+- fast_run_frame
+- fast_render_mode3
+- fast_render_mode4
+- fast_render_mode5
+- fast_compose_fb
+- fast_build_win_layers
+
+## Pro Tips for Maximum Vibes
+
+- Keep Cython functions small and hot
+- Use cdef + typed variables aggressively
+- Pass large arrays (vram, palette, etc.) directly
+- Never use Python objects in inner loops
+- Add `# cython: boundscheck=False, wraparound=False, cdivision=True`
+
+## Future Cython Targets (Priority Order)
+
+1. PPU rendering (biggest win)
+2. Thumb/ARM CPU hot paths
+3. Affine background math
+4. Sprite rendering
+5. Memory bus (read/write)
+
+## CatSDK Official Motto
+
+"If it runs at 60FPS in Python, it shall run at 300+ in Cython."
+"""
+
+MEWGBA_ACCEL_FUNCTIONS = (
+    "fast_run_cycles",
+    "fast_run_scanline",
+    "fast_run_frame",
+    "fast_render_mode3",
+    "fast_render_mode4",
+    "fast_render_mode5",
+    "fast_compose_fb",
+    "fast_build_win_layers",
+)
+
+MEWGBA_FUTURE_CYTHON_TARGETS = (
+    "PPU rendering (biggest win)",
+    "Thumb/ARM CPU hot paths",
+    "Affine background math",
+    "Sprite rendering",
+    "Memory bus (read/write)",
+)
+
 MEWGBA_CACHE = os.path.join(tempfile.gettempdir(), "mewgba_emugba4k")
 MEWGBA_RECENT = os.path.join(MEWGBA_CACHE, "recent.json")
 MEWGBA_SAVES = os.path.join(MEWGBA_CACHE, "saves")
@@ -131,8 +213,9 @@ def _build_demo_rom() -> bytes:
 
 DEFAULT_ROM = _build_demo_rom()
 
-# Pre-baked Cython accel (temp cache, files=off)
+# Pre-baked Cython accel (temp cache, files=off) — see MEWGBA_CYTHON_GUIDE
 _MEWGBA_PYX = r'''# cython: language_level=3, boundscheck=False, wraparound=False, cdivision=True
+# mewgba$ embedded accel — edit parent .py _MEWGBA_PYX string, not this temp file
 
 cdef inline tuple _c565(int c):
     return ((c & 0x1F) << 3, ((c >> 5) & 0x1F) << 3, ((c >> 10) & 0x1F) << 3)
@@ -276,12 +359,29 @@ def fast_render_mode5(vram, prio, pxbuf, win_layers, layer_bit, int base):
 '''
 
 
+def _pyx_digest() -> str:
+    return hashlib.sha256(_MEWGBA_PYX.encode()).hexdigest()
+
+
+def _accel_status() -> dict:
+    """Runtime Cython status for debug UI."""
+    loaded = {name: _ACCEL is not None and hasattr(_ACCEL, name) for name in MEWGBA_ACCEL_FUNCTIONS}
+    return {
+        "active": _ACCEL is not None,
+        "cache": MEWGBA_CACHE,
+        "digest": _pyx_digest()[:16],
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "functions": loaded,
+    }
+
+
 def _load_mewgba_accel():
+    """Compile _MEWGBA_PYX via pyximport into MEWGBA_CACHE; pure-Python fallback on failure."""
     cache = MEWGBA_CACHE
     os.makedirs(cache, exist_ok=True)
     pyx = os.path.join(cache, "mewgba_accel.pyx")
     stamp = os.path.join(cache, "mewgba_accel.hash")
-    digest = hashlib.sha256(_MEWGBA_PYX.encode()).hexdigest()
+    digest = _pyx_digest()
     try:
         import setuptools  # noqa: F401 — pyximport shim on Py3.12+
         if not os.path.exists(stamp) or open(stamp, encoding="utf-8").read().strip() != digest:
@@ -289,6 +389,12 @@ def _load_mewgba_accel():
                 f.write(_MEWGBA_PYX)
             with open(stamp, "w", encoding="utf-8") as f:
                 f.write(digest)
+            guide_path = os.path.join(cache, "CYTHON_GUIDE.txt")
+            try:
+                with open(guide_path, "w", encoding="utf-8") as gf:
+                    gf.write(MEWGBA_CYTHON_GUIDE)
+            except OSError:
+                pass
             for name in os.listdir(cache):
                 if name.startswith("mewgba_accel.") and name.endswith((".pyd", ".so", ".dll")):
                     try:
@@ -2035,6 +2141,48 @@ def _launch_hex_editor(data: bytes, title: str = "mewgba dump") -> None:
         messagebox.showinfo("Hex dump", f"Saved to:\n{dump}")
 
 
+class DebugCythonGuideWindow:
+    """In-app viewer for MEWGBA_CYTHON_GUIDE (no external .md)."""
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.win = tk.Toplevel(root)
+        self.win.title("Cython Guide — mewgba$")
+        self.win.geometry("640x520")
+        self.win.configure(bg="#0a192f")
+        status = _accel_status()
+        header = tk.Frame(self.win, bg="#1a2436")
+        header.pack(fill=tk.X)
+        accel_txt = "ACTIVE +Cython" if status["active"] else "fallback (pure Python)"
+        tk.Label(
+            header,
+            text=f"Accel: {accel_txt}  |  Py {status['python']}  |  cache: {status['cache']}",
+            bg="#1a2436",
+            fg="#00b4d8",
+            font=("Arial", 9),
+            anchor="w",
+            padx=10,
+            pady=6,
+        ).pack(fill=tk.X)
+        body = tk.Text(
+            self.win,
+            bg="#020c1b",
+            fg="#00b4d8",
+            font=("Consolas", 9),
+            relief="flat",
+            padx=10,
+            pady=8,
+            wrap=tk.WORD,
+        )
+        body.pack(fill=tk.BOTH, expand=True)
+        lines = [MEWGBA_CYTHON_GUIDE, "", "── live status ──", f"hash: {status['digest']}…"]
+        for name, ok in status["functions"].items():
+            lines.append(f"  {'✓' if ok else '✗'} {name}")
+        lines += ["", "── future targets ──"]
+        lines.extend(f"  • {t}" for t in MEWGBA_FUTURE_CYTHON_TARGETS)
+        body.insert("1.0", "\n".join(lines))
+        body.config(state=tk.DISABLED)
+
+
 class DebugRegisterWindow:
     def __init__(self, root: tk.Tk, core: MewGBACore) -> None:
         self.core = core
@@ -2150,6 +2298,7 @@ class MewGBAEmulator:
         self._last_frame_t = 0.0
         self._reg_win: DebugRegisterWindow | None = None
         self._mem_win: DebugMemoryWindow | None = None
+        self._cython_win: DebugCythonGuideWindow | None = None
         self._save_slot = os.path.join(MEWGBA_SAVES, "quicksave.mgb")
 
         os.makedirs(MEWGBA_SAVES, exist_ok=True)
@@ -2193,6 +2342,7 @@ class MewGBAEmulator:
         tk.Button(control_frame, text="Load", command=self.load_state, **btn_style).pack(side=tk.LEFT, padx=2)
         tk.Button(control_frame, text="Regs", command=self.open_registers, **btn_style).pack(side=tk.LEFT, padx=2)
         tk.Button(control_frame, text="Mem", command=self.open_memory, **btn_style).pack(side=tk.LEFT, padx=2)
+        tk.Button(control_frame, text="Cython", command=self.open_cython_guide, **btn_style).pack(side=tk.LEFT, padx=2)
 
         row2 = tk.Frame(self.root, bg=self.bg_color)
         row2.pack(fill=tk.X, padx=10, pady=(0, 4))
@@ -2259,6 +2409,12 @@ class MewGBAEmulator:
             self._mem_win.refresh()
             return
         self._mem_win = DebugMemoryWindow(self.root, self.core)
+
+    def open_cython_guide(self) -> None:
+        if self._cython_win and self._cython_win.win.winfo_exists():
+            self._cython_win.win.lift()
+            return
+        self._cython_win = DebugCythonGuideWindow(self.root)
 
     def save_state(self) -> None:
         os.makedirs(MEWGBA_SAVES, exist_ok=True)
